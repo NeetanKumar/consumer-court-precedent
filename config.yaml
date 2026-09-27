@@ -1,0 +1,78 @@
+# Non-secret configuration. API key comes from .env, never from here.
+
+api:
+  base_url: "https://api.indiankanoon.org"
+  rate_limit_per_sec: 1.0
+  # Retry only on 429/5xx/timeout — a retried 4xx just burns credit for nothing.
+  max_retries: 5
+  retry_min_wait_s: 2
+  retry_max_wait_s: 30
+
+pricing_paise:
+  search: 50 # ₹0.50 per page returned
+  doc: 20 # ₹0.20 per document
+  docfragment: 5 # ₹0.05
+  docmeta: 2 # ₹0.02
+
+# Stage 2 (extraction). Tiered: Haiku 4.5 by default, escalate to Sonnet 5
+# only on low self-reported confidence or a failed Haiku attempt (see
+# extract/extractor.py). budget_usd is a hard cap enforced in-process,
+# independent of the Indian Kanoon rupee budget above.
+extraction:
+  budget_usd: 10.0
+
+# Live chat narration (app.py): Haiku 4.5 restates an already-computed
+# PrecedentAnswer as conversational prose — it never computes a number
+# itself. Separate budget from extraction above, since this is ongoing
+# per-query spend from the deployed app, not a one-time offline cost.
+narration:
+  budget_usd: 5.0
+
+categories:
+  builder_delay:
+    label: "Builder/Real-Estate Possession Delay"
+    budget_inr: 400
+    date_from: "1-1-2016" # DD-MM-YYYY, per API contract
+    date_to: "31-12-2026"
+    # Split into multiple overlapping queries rather than one broad query —
+    # recall is the constraint here, and duplicate hits across queries cost
+    # nothing (raw_docs PK check skips already-fetched tids).
+    #
+    # IMPORTANT: verified live against the real API — doctypes:/fromdate:/
+    # todate: filters MUST come AFTER the quoted search terms. Putting them
+    # first silently degrades to an unfiltered free-text search (confirmed:
+    # filters-first returned 195,632 hits; filters-last on the same terms
+    # returned the correct, much smaller counts below).
+    queries:
+      - id: possession_delay_builder
+        text: >-
+          "possession" ANDD "delay" ANDD ("builder" ORR "developer")
+          doctypes:consumer fromdate:1-1-2016 todate:31-12-2026
+      - id: delayed_possession_compensation
+        text: >-
+          "delayed possession" ANDD "compensation"
+          doctypes:consumer fromdate:1-1-2016 todate:31-12-2026
+      - id: refund_booking_amount_flat
+        text: >-
+          "refund" ANDD "booking amount" ANDD "flat"
+          doctypes:consumer fromdate:1-1-2016 todate:31-12-2026
+    # Local post-download filters (see ingest/filters.py). doctypes:consumer
+    # also returns State/District commission matter — NCDRC-only must be
+    # enforced locally on docsource, the API has no ncdrc doctype.
+    filters:
+      ncdrc_source_pattern: "national consumer disputes redressal"
+      award_amount_patterns:
+        - "\\u20b9\\s?[\\d,]+"
+        - "rs\\.?\\s?[\\d,]+"
+        - "\\d+(\\.\\d+)?\\s*(lakh|lakhs|crore|crores)"
+      award_verb_patterns:
+        - "awarded"
+        - "directed to pay"
+        - "compensation of"
+        - "interest\\s*@"
+        - "refund"
+
+  # Placeholders for later categories — not built yet.
+  insurance_repudiation: { label: "Insurance Claim Repudiation" }
+  banking_credit_card: { label: "Banking/Credit Card Disputes" }
+  airline_deficiency: { label: "Airline/Travel Deficiency of Service" }

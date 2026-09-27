@@ -1,0 +1,28 @@
+{
+  "found": 3,
+  "docs": [
+    {
+      "tid": 111111,
+      "title": "Sunil Kumar vs Omaxe Buildhome Pvt Ltd on 12 March, 2021",
+      "headline": "...delayed possession of the flat and sought <b>compensation</b>...",
+      "docsource": "National Consumer Disputes Redressal Commission",
+      "docsize": 18234
+    },
+    {
+      "tid": 222222,
+      "title": "Rekha Sharma vs DLF Homes on 4 July, 2019",
+      "headline": "...builder failed to hand over possession within the promised period...",
+      "docsource": "National Consumer Disputes Redressal Commission",
+      "docsize": 12890
+    },
+    {
+      "tid": 333333,
+      "title": "State Consumer Disputes case",
+      "headline": "...district forum matter, not NCDRC...",
+      "docsource": "State Consumer Disputes Redressal Commission, Delhi",
+      "docsize": 9001
+    }
+  ],
+  "categories": [],
+  "encodedformInput": "doctypes%3Aconsumer+possession+delay"
+}

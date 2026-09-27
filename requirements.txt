@@ -1,0 +1,26 @@
+# Stage 1 (ingestion) + Stage 2 (extraction) + Stage 3 (indexing/retrieval).
+httpx>=0.27
+python-dotenv>=1.0
+pydantic>=2.7
+pydantic-settings>=2.3
+tenacity>=8.3
+beautifulsoup4>=4.12
+lxml>=5.2
+typer>=0.12
+rich>=13.7
+PyYAML>=6.0
+anthropic>=0.68
+
+# Stage 3: local embeddings (no API cost), FAISS vector store, BM25 sparse
+# retrieval, cross-encoder rerank. Deliberately kept out of Stage 1/2 to
+# keep those installs fast and reproducible on their own.
+sentence-transformers>=3.0
+faiss-cpu>=1.14
+rank-bm25>=0.2
+
+# Chat UI (app.py) — streamlit run app.py
+streamlit>=1.38
+
+# dev
+pytest>=8.2
+respx>=0.21
