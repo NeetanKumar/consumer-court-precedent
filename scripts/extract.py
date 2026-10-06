@@ -54,7 +54,11 @@ def main(
         )
 
         client = anthropic.Anthropic(api_key=api_key)
-        extractor = ClaudeExtractor(client, budget)
+        extractor = ClaudeExtractor(
+            client, budget,
+            primary_model=app_config.extraction.primary_model,
+            escalation_model=app_config.extraction.escalation_model,
+        )
 
         summary = run_extraction(extractor, conn, budget, category, max_docs=max_docs, tids=tid_list, force=force)
         _print_summary(summary)

@@ -18,25 +18,26 @@ with every number linked back to its source judgment.
 
 ## Status
 
-**Stage 1 (ingestion) is built and tested for one category:** builder/
-real-estate possession delay. Stages 2–5 are stubbed as module boundaries
-(`src/ccpf/extract`, `index`, `answer`, `eval`) with their planned schemas
-documented in each `__init__.py` — not yet implemented.
+All five stages are built and tested for one category: builder/real-estate
+possession delay (225 NCDRC judgments). A Streamlit chat app (`app.py`)
+sits on top. Other categories in `config.yaml` are placeholders.
 
 ## Pipeline stages
 
-1. **Ingestion** *(built)* — fetch judgments + metadata from the Indian
-   Kanoon API into SQLite, with local NCDRC + award-language filtering.
-2. **Structured extraction** *(planned)* — LLM extraction into a typed
-   schema (case_type, dispute duration, relief components, outcome),
-   validated against a hand-labeled sample.
-3. **Indexing** *(planned)* — section-aware chunking, metadata pre-filter,
-   hybrid BM25 + dense retrieval, cross-encoder rerank.
-4. **Answer generation** *(planned)* — precedent comparison (range/median/
-   sample size) with per-claim citations; refuses or caveats below a
-   minimum sample size instead of guessing.
-5. **Eval & observability** *(planned)* — recall@k/MRR, faithfulness
-   checks, latency/cost tracing, a thin-category refusal test.
+1. **Ingestion** — fetch judgments + metadata from the Indian Kanoon API
+   into SQLite, with local NCDRC + award-language filtering. Resumable and
+   budget-capped.
+2. **Structured extraction** — tiered LLM extraction (Haiku 4.5, escalating
+   to Sonnet on low confidence) into a typed `Judgment` record, validated
+   against a hand-labeled sample.
+3. **Indexing** — section-aware chunking, metadata pre-filter, hybrid
+   BM25 + dense retrieval (local MiniLM + FAISS), cross-encoder rerank.
+4. **Answer generation** — precedent comparison (range/median/sample size/
+   coverage) computed deterministically from the structured facts, with
+   per-claim citations; refuses below a minimum sample size instead of
+   guessing. An LLM only narrates the already-computed result.
+5. **Eval & observability** — recall@k/MRR, faithfulness checks, latency/
+   cost tracing, a thin-category refusal test.
 
 ## Setup
 
@@ -102,19 +103,28 @@ details are easy to get wrong:
 - Billing is **per page/document returned**, not per call attempted;
   `maxpages` batches round-trips but does not reduce cost.
 
+## Later stages and the app
+
+```bash
+python scripts/extract.py --category builder_delay          # Stage 2 (needs ANTHROPIC_API_KEY)
+python scripts/build_validation_set.py && python scripts/score_validation.py
+python scripts/build_index.py --category builder_delay      # Stage 3
+python scripts/search.py "builder delayed possession 3 years"
+python scripts/answer.py "builder delayed possession 3 years"   # Stage 4
+python scripts/eval_retrieval.py                            # Stage 5
+streamlit run app.py                                        # chat UI
+```
+
 ## Repo layout
 
 ```
 src/ccpf/
   config.py, db.py, models.py   # shared: settings, SQLite schema, pydantic models
-  ingest/                       # Stage 1 — built
-  extract/  index/  answer/  eval/   # Stages 2-5 — interface stubs only
-scripts/
-  ingest.py       # CLI: run ingestion for one category
-  inspect_db.py   # CLI: corpus stats / Stage-1 exit gate
-tests/            # respx-mocked, zero real spend or network access
+  ingest/ extract/ index/ answer/ eval/   # Stages 1-5
+app.py                          # Streamlit chat UI
+scripts/                        # one CLI per stage + inspect/eval helpers
+tests/                          # mocked, zero real spend or network access
 ```
 
 Each stage is a separate package with its own CLI entry point — ingestion,
-extraction, retrieval, and eval are meant to run and be tested
-independently, never as one monolithic script.
+extraction, retrieval, and eval run and are tested independently.

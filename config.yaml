@@ -20,6 +20,8 @@ pricing_paise:
 # independent of the Indian Kanoon rupee budget above.
 extraction:
   budget_usd: 10.0
+  primary_model: "claude-haiku-4-5"
+  escalation_model: "claude-sonnet-5"
 
 # Live chat narration (app.py): Haiku 4.5 restates an already-computed
 # PrecedentAnswer as conversational prose — it never computes a number

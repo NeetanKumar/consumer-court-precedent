@@ -83,6 +83,10 @@ class PricingConfig(BaseModel):
 
 class ExtractionConfig(BaseModel):
     budget_usd: float = 10.0
+    # Model IDs live here so a model bump is a config change, not a code
+    # change. Every ID must have a price entry in extract/cost.py.
+    primary_model: str = "claude-haiku-4-5"
+    escalation_model: str = "claude-sonnet-5"
 
 
 class NarrationConfig(BaseModel):
