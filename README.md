@@ -115,6 +115,12 @@ python scripts/eval_retrieval.py                            # Stage 5
 streamlit run app.py                                        # chat UI
 ```
 
+## Data & terms
+
+Judgment text comes from the Indian Kanoon API and is subject to its terms
+of use. Check them before redistributing the corpus or deploying the app
+publicly. The app is informational only and is not legal advice.
+
 ## Repo layout
 
 ```

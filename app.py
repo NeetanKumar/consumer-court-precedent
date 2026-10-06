@@ -50,6 +50,7 @@ from ccpf.eval.tracing import observed_generate_answer
 from ccpf.index.embedder import LocalEmbedder
 from ccpf.index.rerank import CrossEncoderReranker
 from ccpf.index.store import HybridIndex
+from ccpf.ui.limits import DISCLAIMER, MAX_MESSAGE_CHARS, SessionRateLimiter
 
 DEFAULT_INDEX_DIR = REPO_ROOT / "data" / "index"
 CATEGORY = "builder_delay"  # only category built so far
@@ -172,16 +173,19 @@ def _render_answer(headline: str, answer_dict: Optional[dict]) -> None:
     the same whether they're brand new or re-rendered after a rerun."""
     if answer_dict is None:
         st.markdown(headline)
+        st.caption(DISCLAIMER)
         return
 
     answer = PrecedentAnswer.model_validate(answer_dict)
     if answer.refused:
         st.warning(f"**Insufficient precedent.**\n\n{answer.refusal_reason}", icon="⚠️")
+        st.caption(DISCLAIMER)
         return
 
     st.markdown(headline)
     _render_metrics(answer)
     _render_details(answer)
+    st.caption(f"{DISCLAIMER} Based on {answer.sample_size} comparable judgments.")
 
 
 def _last_successful_answer() -> Optional[PrecedentAnswer]:
@@ -239,6 +243,11 @@ def _run_new_situation_pipeline(client, situation: str) -> None:
 
 
 def _process_situation(situation: str) -> None:
+    situation = situation.strip()[:MAX_MESSAGE_CHARS]
+    if not st.session_state.rate_limiter.allow():
+        wait = int(st.session_state.rate_limiter.retry_after_s()) + 1
+        st.warning(f"You're sending messages too quickly. Please try again in about {wait}s.", icon="⏳")
+        return
     st.session_state.messages.append({"role": "user", "content": situation, "answer": None})
     with st.chat_message("user"):
         st.markdown(situation)
@@ -251,6 +260,7 @@ def _process_situation(situation: str) -> None:
             followup_text = _try_answer_as_followup(client, situation, last_answer)
             if followup_text is not None:
                 st.markdown(followup_text)
+                st.caption(DISCLAIMER)
                 st.session_state.messages.append({"role": "assistant", "content": followup_text, "answer": None})
                 return
 
@@ -282,6 +292,8 @@ with st.sidebar:
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "rate_limiter" not in st.session_state:
+    st.session_state.rate_limiter = SessionRateLimiter(max_requests=10, window_s=600)
 if "pending_situation" not in st.session_state:
     st.session_state.pending_situation = None
 
@@ -299,7 +311,7 @@ for msg in st.session_state.messages:
         else:
             _render_answer(msg["content"], msg["answer"])
 
-situation = st.chat_input("Describe your situation...")
+situation = st.chat_input("Describe your situation...", max_chars=MAX_MESSAGE_CHARS)
 if st.session_state.pending_situation:
     situation = st.session_state.pending_situation
     st.session_state.pending_situation = None
