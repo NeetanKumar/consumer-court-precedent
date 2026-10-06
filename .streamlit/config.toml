@@ -1,2 +1,39 @@
 [browser]
 gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+
+# Both light and dark are defined so viewers can switch in the app menu.
+[theme]
+primaryColor = "#10a37f"
+baseRadius = "large"
+buttonRadius = "full"
+showWidgetBorder = true
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+baseFontSize = 15
+headingFontWeights = [600, 600, 600, 600, 600, 600]
+linkUnderline = false
+
+[theme.light]
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f7f7f8"
+textColor = "#0d0d0d"
+borderColor = "#e5e5e5"
+codeBackgroundColor = "#f4f4f5"
+
+[theme.light.sidebar]
+backgroundColor = "#f9f9f9"
+secondaryBackgroundColor = "#ececec"
+
+[theme.dark]
+backgroundColor = "#212121"
+secondaryBackgroundColor = "#2f2f2f"
+textColor = "#ececec"
+borderColor = "#3f3f3f"
+codeBackgroundColor = "#2a2a2a"
+
+[theme.dark.sidebar]
+backgroundColor = "#171717"
+secondaryBackgroundColor = "#2a2a2a"

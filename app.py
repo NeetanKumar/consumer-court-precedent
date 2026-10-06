@@ -2,33 +2,19 @@
 
 Run with: streamlit run app.py
 
-Two-stage answer: Stage 3/4 retrieval + aggregation computes every number
-directly from Stage 2's structured judgment records (no LLM, fully
-traceable) — then an LLM (Haiku 4.5) NARRATES that already-computed data
-into conversational prose. The narration model never computes or invents
-a figure; see answer/narrate.py for the faithfulness constraints on it.
-If narration fails or its budget is exhausted, the app falls back to a
-simple deterministic headline instead of losing the response entirely —
-the metric cards, table, and citation cards below render identically
-either way, so a fallback doesn't look degraded.
+Every number in an answer is computed deterministically from structured
+judgment records (Stage 3/4, no LLM); Haiku only narrates that
+already-computed result, streamed token by token. If narration fails or its
+budget is exhausted, a deterministic headline is shown instead — the
+metric cards, chart and citations below it are identical either way.
 
-Deliberately no exposed filters/knobs (category, outcome, date range,
-min sample size, rerank toggle, cache toggle, faithfulness check) — those
-are internal tuning parameters, not something an end user should need to
-understand.
+State lives in SQLite (ccpf.ui.store), not in st.session_state, so a page
+refresh or a shared link keeps the conversation. Visitors are scoped by a
+random `u` id carried in the URL (a capability token, not a login).
 
-Chat history stores each assistant turn as {headline, answer: dict | None}
-rather than a flat markdown string — replay re-renders through the same
-_render_answer() path as a live response, so metric cards and citation
-cards look identical on reload, not just on the turn they were created.
-
-Follow-up questions: without this, every message re-runs full retrieval
-from scratch as if it were an independent new situation, so "what is the
-median interest rate" right after a real answer gets searched for AS a
-consumer dispute, finds nothing, and falsely refuses. A cheap classifier
-(answer/followup.py) checks each new message against the last successful
-answer first — a genuine follow-up is answered from that existing data
-with no new retrieval; anything else runs the normal pipeline.
+Follow-ups ("what interest rate?") are classified against the last
+successful answer first and answered from that data without a new
+retrieval; anything else runs the full pipeline.
 """
 from __future__ import annotations
 
@@ -41,34 +27,38 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 import anthropic
 import streamlit as st
 
-from ccpf.answer.followup import answer_followup, classify_message
-from ccpf.answer.narrate import NarrationBudgetExceeded, NarrationBudgetTracker, NarrationFailed, format_inr, narrate_answer
-from ccpf.answer.schema import Citation, ComponentStats, PrecedentAnswer
+from ccpf.answer.followup import answer_followup_stream, classify_message
+from ccpf.answer.narrate import (
+    NarrationBudgetExceeded,
+    NarrationBudgetTracker,
+    NarrationFailed,
+    narrate_answer_stream,
+)
+from ccpf.answer.schema import PrecedentAnswer
 from ccpf.config import DEFAULT_DB_PATH, REPO_ROOT, get_settings, load_app_config
 from ccpf.db import connection
 from ccpf.eval.tracing import observed_generate_answer
 from ccpf.index.embedder import LocalEmbedder
 from ccpf.index.rerank import CrossEncoderReranker
 from ccpf.index.store import HybridIndex
+from ccpf.ui import store
 from ccpf.ui.limits import DISCLAIMER, MAX_MESSAGE_CHARS, SessionRateLimiter
+from ccpf.ui.render import render_answer_body, render_refusal
+from ccpf.ui.suggestions import follow_up_suggestions
 
 DEFAULT_INDEX_DIR = REPO_ROOT / "data" / "index"
 CATEGORY = "builder_delay"  # only category built so far
 
-OUTCOME_BADGE = {
-    "allowed": "🟢 Allowed",
-    "partly_allowed": "🟠 Partly allowed",
-    "dismissed": "🔴 Dismissed",
-}
-
-EXAMPLE_SITUATIONS = [
-    "Builder delayed possession by 3 years and refused to refund the booking amount",
-    "Booked a flat in 2015, still not handed over 6 years later, seeking compensation",
-    "Developer cancelled my booking and won't return the advance payment",
+EXAMPLES = [
+    (":material/home_work:", "Builder delayed possession by 3 years and refused to refund the booking amount"),
+    (":material/event_busy:", "Booked a flat in 2015, still not handed over 6 years later, seeking compensation"),
+    (":material/payments:", "Developer cancelled my booking and won't return the advance payment"),
 ]
 
-st.set_page_config(page_title="Consumer Court Precedent Finder", page_icon="⚖️", layout="wide")
+st.set_page_config(page_title="Consumer Court Precedent Finder", page_icon=":material/balance:", layout="centered")
 
+
+# --- resources -----------------------------------------------------------
 
 @st.cache_resource
 def load_resources(category: str):
@@ -80,247 +70,293 @@ def load_resources(category: str):
 
 @st.cache_resource
 def load_anthropic_client():
-    settings = get_settings()
-    key = settings.anthropic_api_key
-    if not key:
-        return None  # narration is optional — app still works without it
-    return anthropic.Anthropic(api_key=key)
+    key = get_settings().anthropic_api_key
+    return anthropic.Anthropic(api_key=key) if key else None  # narration is optional
 
 
-def _format_value(stats: ComponentStats, value: Optional[float]) -> str:
-    if value is None:
-        return "n/a"
-    if stats.field_name == "interest_rate":
-        return f"{value:.1f}%"
-    return format_inr(value)
+@st.cache_data(ttl=600)
+def corpus_size(category: str) -> int:
+    with connection(DEFAULT_DB_PATH) as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM extractions WHERE category = ?", (category,)).fetchone()[0])
 
 
-def _format_citation_relief(c: Citation) -> str:
-    """The relief actually awarded in this specific judgment — separate
-    from the aggregated median/min/max stats, which blend across all
-    cited judgments. Without this, a citation only showed what was
-    claimed, never what was awarded."""
-    parts = []
-    if c.amount_claimed is not None:
-        parts.append(f"claimed {format_inr(c.amount_claimed)}")
-    refund = c.relief_components.get("refund")
-    if refund is not None:
-        parts.append(f"refund awarded {format_inr(refund)}")
-    interest = c.relief_components.get("interest_rate")
-    if interest is not None:
-        parts.append(f"interest {interest:.1f}%")
-    agony = c.relief_components.get("mental_agony_compensation")
-    if agony is not None:
-        parts.append(f"mental agony {format_inr(agony)}")
-    litigation = c.relief_components.get("litigation_cost")
-    if litigation is not None:
-        parts.append(f"litigation cost {format_inr(litigation)}")
-    return " · ".join(parts) if parts else "amounts not extracted for this judgment"
+# --- session identity ----------------------------------------------------
+
+def _init_session() -> None:
+    if "owner" not in st.session_state:
+        st.session_state.owner = st.query_params.get("u") or store.new_id()
+    st.query_params["u"] = st.session_state.owner
+    if "conv_id" not in st.session_state:
+        st.session_state.conv_id = st.query_params.get("c")
+    if "rate_limiter" not in st.session_state:
+        st.session_state.rate_limiter = SessionRateLimiter(max_requests=10, window_s=600)
+    st.session_state.setdefault("pending", None)
 
 
-def _render_metrics(answer: PrecedentAnswer) -> None:
-    cols = st.columns(3)
-    cols[0].metric("Comparable judgments", answer.sample_size)
-
-    refund_stats = answer.relief_component_stats.get("refund")
-    if refund_stats and refund_stats.median is not None:
-        cols[1].metric(
-            "Median refund awarded", format_inr(refund_stats.median),
-            help=f"Based on {refund_stats.coverage}/{refund_stats.sample_size} judgments with this data",
-        )
-    elif answer.amount_claimed_stats and answer.amount_claimed_stats.median is not None:
-        cols[1].metric("Median amount claimed", format_inr(answer.amount_claimed_stats.median))
-
-    interest_stats = answer.relief_component_stats.get("interest_rate")
-    if interest_stats and interest_stats.median is not None:
-        cols[2].metric(
-            "Median interest rate", f"{interest_stats.median:.1f}%",
-            help=f"Based on {interest_stats.coverage}/{interest_stats.sample_size} judgments with this data",
-        )
+def _set_conversation(conv_id: Optional[str]) -> None:
+    st.session_state.conv_id = conv_id
+    if conv_id:
+        st.query_params["c"] = conv_id
+    elif "c" in st.query_params:
+        del st.query_params["c"]
 
 
-def _render_citation_card(c: Citation) -> None:
-    with st.container(border=True):
-        badge = OUTCOME_BADGE.get(c.outcome, c.outcome)
-        st.markdown(f"**tid {c.tid}**&nbsp;&nbsp;·&nbsp;&nbsp;{badge}&nbsp;&nbsp;·&nbsp;&nbsp;relevance {c.relevance_score:.2f}")
-        st.caption(_format_citation_relief(c))
-        summary = c.fact_summary[:250] + ("…" if len(c.fact_summary) > 250 else "")
-        st.write(summary)
+# --- callbacks -----------------------------------------------------------
+
+def _ask(text: str) -> None:
+    st.session_state.pending = {"text": text, "add_user": True}
 
 
-def _render_details(answer: PrecedentAnswer) -> None:
-    with st.expander("📊 Full statistics & cited judgments"):
-        st.markdown(
-            "**Outcome distribution:** "
-            + ", ".join(f"{OUTCOME_BADGE.get(k, k)}: {v}" for k, v in answer.outcome_distribution.items())
-        )
-        if answer.award_known_count:
-            st.markdown(
-                f"**Judgments that directed a monetary award:** "
-                f"{answer.award_made_count} of {answer.award_known_count} "
-                "(the rest were remands, procedural orders or dismissals)"
-            )
-        lines = ["| Field | Coverage | Median | Min | Max |", "|---|---|---|---|---|"]
-        stats_list = [answer.amount_claimed_stats] if answer.amount_claimed_stats else []
-        stats_list += list(answer.relief_component_stats.values())
-        for s in stats_list:
-            cov = f"{s.coverage}/{s.sample_size} ({s.coverage_fraction*100:.0f}%)"
-            lines.append(f"| {s.field_name} | {cov} | {_format_value(s, s.median)} | {_format_value(s, s.min)} | {_format_value(s, s.max)} |")
-        st.markdown("\n".join(lines))
-
-        st.markdown("**Cited judgments:**")
-        for c in answer.citations:
-            _render_citation_card(c)
+def _regenerate(user_text: str, assistant_id: int) -> None:
+    with connection(DEFAULT_DB_PATH) as conn:
+        store.delete_message(conn, st.session_state.owner, st.session_state.conv_id, assistant_id)
+    st.session_state.pending = {"text": user_text, "add_user": False}
 
 
-def _render_answer(headline: str, answer_dict: Optional[dict]) -> None:
-    """Shared rendering path for both a freshly computed response and a
-    replayed history entry — a refusal, a citation card, a metric all look
-    the same whether they're brand new or re-rendered after a rerun."""
-    if answer_dict is None:
-        st.markdown(headline)
-        st.caption(DISCLAIMER)
-        return
-
-    answer = PrecedentAnswer.model_validate(answer_dict)
-    if answer.refused:
-        st.warning(f"**Insufficient precedent.**\n\n{answer.refusal_reason}", icon="⚠️")
-        st.caption(DISCLAIMER)
-        return
-
-    st.markdown(headline)
-    _render_metrics(answer)
-    _render_details(answer)
-    st.caption(f"{DISCLAIMER} Based on {answer.sample_size} comparable judgments.")
+def _new_chat() -> None:
+    _set_conversation(None)
 
 
-def _last_successful_answer() -> Optional[PrecedentAnswer]:
-    for msg in reversed(st.session_state.messages):
-        if msg["role"] == "assistant" and msg.get("answer") is not None:
-            answer = PrecedentAnswer.model_validate(msg["answer"])
-            if not answer.refused:
-                return answer
+def _open_chat(conv_id: str) -> None:
+    _set_conversation(conv_id)
+
+
+def _delete_chat(conv_id: str) -> None:
+    with connection(DEFAULT_DB_PATH) as conn:
+        store.delete_conversation(conn, st.session_state.owner, conv_id)
+    if st.session_state.conv_id == conv_id:
+        _set_conversation(None)
+
+
+def _save_feedback(message_id: int) -> None:
+    value = st.session_state.get(f"fb_{message_id}")
+    with connection(DEFAULT_DB_PATH) as conn:
+        store.set_feedback(conn, st.session_state.owner, message_id, value)
+
+
+# --- rendering -----------------------------------------------------------
+
+def _load_history() -> list[dict]:
+    if not st.session_state.conv_id:
+        return []
+    with connection(DEFAULT_DB_PATH) as conn:
+        return store.load_messages(conn, st.session_state.owner, st.session_state.conv_id)
+
+
+def _answer_of(msg: dict) -> Optional[PrecedentAnswer]:
+    return PrecedentAnswer.model_validate_json(msg["answer_json"]) if msg.get("answer_json") else None
+
+
+def _last_successful_answer(history: list[dict]) -> Optional[PrecedentAnswer]:
+    for msg in reversed(history):
+        answer = _answer_of(msg) if msg["role"] == "assistant" else None
+        if answer is not None and not answer.refused:
+            return answer
     return None
 
 
-def _try_answer_as_followup(client, situation: str, last_answer: PrecedentAnswer) -> Optional[str]:
-    """Returns the follow-up response text, or None if this message isn't
-    a follow-up (or answering as one failed) — callers fall through to the
-    normal full-retrieval pipeline in either case."""
-    with connection(DEFAULT_DB_PATH) as conn:
-        app_config = load_app_config()
-        budget = NarrationBudgetTracker(conn, cap_usd=app_config.narration.budget_usd)
-        with st.spinner("Checking your previous result..."):
-            intent = classify_message(client, budget, situation, last_answer)
-        if intent != "FOLLOWUP":
-            return None
-        try:
-            return answer_followup(client, budget, situation, last_answer)
-        except (NarrationBudgetExceeded, NarrationFailed):
-            return None  # fall through to a fresh search rather than fail outright
+def _render_assistant(msg: dict, user_text: Optional[str], is_last: bool) -> None:
+    answer = _answer_of(msg)
+    if answer is not None and answer.refused:
+        render_refusal(answer)
+        copy_text = answer.refusal_reason or ""
+    else:
+        st.markdown(msg["content"])
+        if answer is not None:
+            render_answer_body(answer)
+        else:
+            st.caption(DISCLAIMER)
+        copy_text = msg["content"]
 
-
-def _run_new_situation_pipeline(client, situation: str) -> None:
-    with st.spinner("Retrieving comparable judgments..."):
-        embedder, index, reranker = load_resources(CATEGORY)
-        with connection(DEFAULT_DB_PATH) as conn:
-            answer = observed_generate_answer(
-                conn, index, embedder, CATEGORY, situation, reranker=reranker,
+    with st.container(horizontal=True, vertical_alignment="center"):
+        st.feedback(
+            "thumbs", key=f"fb_{msg['id']}", default=msg.get("feedback"),
+            on_change=_save_feedback, args=(msg["id"],),
+        )
+        with st.popover("", icon=":material/content_copy:", help="Copy this answer"):
+            st.code(copy_text, language=None, wrap_lines=True)
+        if is_last and user_text:
+            st.button(
+                "", icon=":material/refresh:", key=f"regen_{msg['id']}", help="Regenerate",
+                type="tertiary", on_click=_regenerate, args=(user_text, msg["id"]),
             )
 
-            narrated = None
-            if not answer.refused and client is not None:
-                try:
-                    app_config = load_app_config()
-                    budget = NarrationBudgetTracker(conn, cap_usd=app_config.narration.budget_usd)
-                    narrated = narrate_answer(client, budget, answer)
-                except (NarrationBudgetExceeded, NarrationFailed):
-                    narrated = None  # fall back to a deterministic headline below
-
-    if answer.refused:
-        headline = ""  # _render_answer shows the warning box using refusal_reason
-    elif narrated is not None:
-        headline = narrated
-    else:
-        headline = f"Based on **{answer.sample_size} comparable judgments**, here's a compensation comparison for similar cases:"
-
-    _render_answer(headline, answer.model_dump())
-    st.session_state.messages.append({"role": "assistant", "content": headline, "answer": answer.model_dump()})
+    if is_last and answer is not None:
+        chips = follow_up_suggestions(answer)
+        if chips:
+            with st.container(horizontal=True):
+                for i, chip in enumerate(chips):
+                    st.button(chip, key=f"chip_{msg['id']}_{i}", on_click=_ask, args=(chip,), type="secondary")
 
 
-def _process_situation(situation: str) -> None:
-    situation = situation.strip()[:MAX_MESSAGE_CHARS]
-    if not st.session_state.rate_limiter.allow():
+def _render_history(history: list[dict]) -> None:
+    last_user: Optional[str] = None
+    last_assistant_idx = max((i for i, m in enumerate(history) if m["role"] == "assistant"), default=-1)
+    for i, msg in enumerate(history):
+        with st.chat_message(msg["role"]):
+            if msg["role"] == "user":
+                last_user = msg["content"]
+                st.markdown(msg["content"])
+            else:
+                _render_assistant(msg, last_user, is_last=(i == last_assistant_idx))
+
+
+def _render_empty_state() -> None:
+    st.title("Consumer court precedent finder")
+    st.markdown(
+        "Describe a consumer dispute and see what similar complainants were actually awarded, "
+        "with citations to the judgments."
+    )
+    for icon, text in EXAMPLES:
+        st.button(f"{icon} {text}", key=f"ex_{text[:12]}", on_click=_ask, args=(text,), width="stretch")
+    st.caption(f"Based on {corpus_size(CATEGORY)} NCDRC judgments on builder possession delay.")
+
+
+def _render_sidebar() -> None:
+    with st.sidebar:
+        st.button("New chat", icon=":material/edit_square:", on_click=_new_chat, width="stretch")
+        with connection(DEFAULT_DB_PATH) as conn:
+            chats = store.list_conversations(conn, st.session_state.owner)
+        if chats:
+            st.caption("Recent")
+        for chat in chats:
+            with st.container(horizontal=True, vertical_alignment="center"):
+                active = chat["id"] == st.session_state.conv_id
+                st.button(
+                    chat["title"], key=f"open_{chat['id']}", on_click=_open_chat, args=(chat["id"],),
+                    type="primary" if active else "tertiary", width="stretch",
+                )
+                st.button(
+                    "", icon=":material/delete:", key=f"del_{chat['id']}", help="Delete chat",
+                    on_click=_delete_chat, args=(chat["id"],), type="tertiary",
+                )
+        st.divider()
+        st.caption(
+            "Every number is computed from structured judgment data, not generated. "
+            "If fewer than 10 comparable judgments are found, the app declines to answer."
+        )
+        if load_anthropic_client() is None:
+            st.caption(":orange[:material/info:] No API key set: answers show without the written summary.")
+
+
+# --- answering -----------------------------------------------------------
+
+def _try_followup(client, text: str, last_answer: PrecedentAnswer, status) -> Optional[str]:
+    """Stream a follow-up answer from the last result's data. Returns the
+    text, or None if this isn't a follow-up or answering failed (callers
+    fall through to a fresh search)."""
+    with connection(DEFAULT_DB_PATH) as conn:
+        budget = NarrationBudgetTracker(conn, cap_usd=load_app_config().narration.budget_usd)
+        status.update(label="Checking your previous result…")
+        if classify_message(client, budget, text, last_answer) != "FOLLOWUP":
+            return None
+        slot = st.empty()
+        try:
+            with slot.container():
+                return st.write_stream(answer_followup_stream(client, budget, text, last_answer))
+        except (NarrationBudgetExceeded, NarrationFailed):
+            slot.empty()
+            return None
+
+
+def _fallback_headline(answer: PrecedentAnswer) -> str:
+    return f"Based on **{answer.sample_size} comparable judgments**, here is a compensation comparison for similar cases:"
+
+
+def _answer_new_situation(client, text: str, status) -> tuple[str, Optional[PrecedentAnswer]]:
+    status.update(label=f"Searching {corpus_size(CATEGORY)} judgments…")
+    try:
+        embedder, index, reranker = load_resources(CATEGORY)
+    except FileNotFoundError:
+        status.update(label="Search index not built", state="error")
+        st.error("The search index hasn't been built yet. Run `python scripts/build_index.py --category builder_delay`.")
+        return "", None
+
+    with connection(DEFAULT_DB_PATH) as conn:
+        answer = observed_generate_answer(conn, index, embedder, CATEGORY, text, reranker=reranker)
+        if answer.refused:
+            status.update(label="No close precedent found", state="complete")
+            return "", answer
+
+        status.update(label="Writing the answer…")
+        headline = None
+        if client is not None:
+            budget = NarrationBudgetTracker(conn, cap_usd=load_app_config().narration.budget_usd)
+            slot = st.empty()
+            try:
+                with slot.container():
+                    headline = st.write_stream(narrate_answer_stream(client, budget, answer))
+            except (NarrationBudgetExceeded, NarrationFailed):
+                slot.empty()
+        if not headline:
+            headline = _fallback_headline(answer)
+            st.markdown(headline)
+    status.update(label=f"Found {answer.sample_size} comparable judgments", state="complete")
+    return headline, answer
+
+
+def _handle(text: str, add_user: bool) -> None:
+    text = text.strip()[:MAX_MESSAGE_CHARS]
+    if add_user and not st.session_state.rate_limiter.allow():
         wait = int(st.session_state.rate_limiter.retry_after_s()) + 1
-        st.warning(f"You're sending messages too quickly. Please try again in about {wait}s.", icon="⏳")
+        st.warning(f"You're sending messages too quickly. Please try again in about {wait}s.", icon=":material/hourglass_top:")
         return
-    st.session_state.messages.append({"role": "user", "content": situation, "answer": None})
-    with st.chat_message("user"):
-        st.markdown(situation)
 
+    history = _load_history()
+    last_answer = _last_successful_answer(history)
+
+    with connection(DEFAULT_DB_PATH) as conn:
+        if st.session_state.conv_id is None:
+            _set_conversation(store.create_conversation(conn, st.session_state.owner, text))
+        if add_user:
+            store.add_message(conn, st.session_state.conv_id, "user", text)
+
+    # Replay the earlier turns above the new exchange so the page doesn't jump.
+    _render_history(history)
+    if add_user:
+        with st.chat_message("user"):
+            st.markdown(text)
+
+    client = load_anthropic_client()
     with st.chat_message("assistant"):
-        client = load_anthropic_client()
-        last_answer = _last_successful_answer()
+        status = st.status("Thinking…", expanded=False)
+        content: Optional[str] = None
+        answer: Optional[PrecedentAnswer] = None
 
         if client is not None and last_answer is not None:
-            followup_text = _try_answer_as_followup(client, situation, last_answer)
-            if followup_text is not None:
-                st.markdown(followup_text)
-                st.caption(DISCLAIMER)
-                st.session_state.messages.append({"role": "assistant", "content": followup_text, "answer": None})
-                return
+            content = _try_followup(client, text, last_answer, status)
+            if content is not None:
+                status.update(label="Answered from your previous result", state="complete")
 
-        _run_new_situation_pipeline(client, situation)
+        if content is None:
+            content, answer = _answer_new_situation(client, text, status)
+            if answer is None and not content:
+                return  # error already shown
+
+    with connection(DEFAULT_DB_PATH) as conn:
+        store.add_message(
+            conn, st.session_state.conv_id, "assistant", content or "",
+            answer_json=answer.model_dump_json() if answer is not None else None,
+        )
+    st.rerun()
 
 
-st.title("⚖️ Consumer Court Precedent Finder")
-st.caption(
-    "Grounded in real NCDRC judgments. Describe your situation — e.g. a builder delaying possession — "
-    "and get a compensation comparison with citations, not a generic answer. "
-    "Refuses rather than guesses when there isn't enough precedent."
-)
+# --- main ----------------------------------------------------------------
 
-with st.sidebar:
-    st.subheader("About this data")
-    st.markdown(
-        "**225 NCDRC judgments** on builder/real-estate possession delay, "
-        "structured and independently validated for accuracy."
-    )
-    st.caption(
-        "Every number is computed directly from structured judgment data, not generated — "
-        "an LLM only rewrites the already-computed result as prose. If fewer than 10 "
-        "genuinely comparable judgments are found, the app refuses rather than guesses."
-    )
-    st.divider()
-    if st.button("Clear chat", use_container_width=True):
-        st.session_state.messages = []
-        st.rerun()
+_init_session()
+_render_sidebar()
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "rate_limiter" not in st.session_state:
-    st.session_state.rate_limiter = SessionRateLimiter(max_requests=10, window_s=600)
-if "pending_situation" not in st.session_state:
-    st.session_state.pending_situation = None
+history = _load_history()
+pending = st.session_state.pending
+st.session_state.pending = None
 
-if not st.session_state.messages:
-    st.markdown("#### Try an example, or describe your own situation below")
-    cols = st.columns(len(EXAMPLE_SITUATIONS))
-    for col, example in zip(cols, EXAMPLE_SITUATIONS):
-        if col.button(example, use_container_width=True):
-            st.session_state.pending_situation = example
+typed = st.chat_input("Describe your situation…", max_chars=MAX_MESSAGE_CHARS)
 
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        if msg["role"] == "user":
-            st.markdown(msg["content"])
-        else:
-            _render_answer(msg["content"], msg["answer"])
-
-situation = st.chat_input("Describe your situation...", max_chars=MAX_MESSAGE_CHARS)
-if st.session_state.pending_situation:
-    situation = st.session_state.pending_situation
-    st.session_state.pending_situation = None
-
-if situation:
-    _process_situation(situation)
+if typed:
+    _handle(typed, add_user=True)
+elif pending:
+    _handle(pending["text"], add_user=pending["add_user"])
+elif history:
+    _render_history(history)
+else:
+    _render_empty_state()
