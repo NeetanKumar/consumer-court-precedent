@@ -131,6 +131,10 @@ def generate_answer(
         for field in RELIEF_FIELDS
     }
 
+    def _doc_meta(tid: int) -> dict:
+        row = conn.execute("SELECT title, publishdate FROM raw_docs WHERE tid = ?", (tid,)).fetchone()
+        return {"title": row["title"] or None, "publishdate": row["publishdate"] or None} if row else {}
+
     citations = [
         Citation(
             tid=r.tid,
@@ -139,6 +143,8 @@ def generate_answer(
             relief_components=r.judgment.get("relief_components") or {},
             fact_summary=r.judgment.get("fact_summary", ""),
             relevance_score=r.score,
+            forum_level=r.judgment.get("forum_level"),
+            **_doc_meta(r.tid),
         )
         for r in retrieved[:num_citations]
     ]

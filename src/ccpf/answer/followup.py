@@ -24,7 +24,7 @@ import json
 
 import anthropic
 
-from ccpf.answer.narrate import NarrationBudgetTracker, NarrationFailed, build_narration_payload
+from ccpf.answer.narrate import NarrationBudgetTracker, NarrationFailed, build_narration_payload, stream_text
 from ccpf.answer.schema import PrecedentAnswer
 
 FOLLOWUP_MODEL = "claude-haiku-4-5"
@@ -108,3 +108,17 @@ def answer_followup(
     if not text.strip():
         raise NarrationFailed("followup model returned no text")
     return text
+
+
+def answer_followup_stream(
+    client: anthropic.Anthropic,
+    budget: NarrationBudgetTracker,
+    message: str,
+    last_answer: PrecedentAnswer,
+):
+    payload = json.dumps(build_narration_payload(last_answer), indent=2, ensure_ascii=False)
+    return stream_text(
+        client, budget, model=FOLLOWUP_MODEL, system=FOLLOWUP_SYSTEM_PROMPT,
+        user_content=f"Previous answer data:\n{payload}\n\nFollow-up question: {message}",
+        max_tokens=512, ref=f"followup:{message[:60]}",
+    )

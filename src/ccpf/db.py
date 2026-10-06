@@ -166,6 +166,29 @@ CREATE TABLE IF NOT EXISTS query_cache (
     cached_at    TEXT NOT NULL
 );
 
+-- Chat history for the Streamlit app. `owner` is a random id the browser
+-- carries in the URL, so the sidebar only lists that visitor's own chats.
+-- It is a capability token, not authentication.
+CREATE TABLE IF NOT EXISTS conversations (
+    id          TEXT PRIMARY KEY,
+    owner       TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id  TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    role             TEXT NOT NULL,
+    content          TEXT NOT NULL,
+    answer_json      TEXT,
+    feedback         INTEGER,  -- 1 = thumbs up, 0 = thumbs down, NULL = none
+    created_at       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_owner ON conversations(owner, updated_at);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_conv ON chat_messages(conversation_id, id);
 CREATE INDEX IF NOT EXISTS idx_search_hits_query ON search_hits(query_id);
 CREATE INDEX IF NOT EXISTS idx_spend_log_run ON spend_log(run_id);
 CREATE INDEX IF NOT EXISTS idx_llm_spend_log_run ON llm_spend_log(run_id);

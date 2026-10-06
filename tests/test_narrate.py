@@ -194,3 +194,76 @@ def test_budget_tracker_uses_separate_ledger_from_stage2(db_conn):
     # ...must not affect the narration ledger's starting point.
     narration_budget = NarrationBudgetTracker(db_conn, cap_usd=5.0)
     assert narration_budget.spent_microusd == 0
+
+
+# --- streaming ---------------------------------------------------------------
+
+class _FakeStream:
+    def __init__(self, chunks, stop_reason="end_turn", fail_after=None):
+        self._chunks, self._stop, self._fail_after = chunks, stop_reason, fail_after
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    @property
+    def text_stream(self):
+        for i, c in enumerate(self._chunks):
+            if self._fail_after is not None and i == self._fail_after:
+                raise anthropic.APIConnectionError(request=httpx.Request("POST", "http://x"))
+            yield c
+
+    def get_final_message(self):
+        return SimpleNamespace(
+            stop_reason=self._stop, usage=SimpleNamespace(input_tokens=1000, output_tokens=100)
+        )
+
+
+class _FakeStreamClient:
+    def __init__(self, stream):
+        self.messages = SimpleNamespace(stream=lambda **kw: stream)
+
+
+def test_stream_text_yields_chunks_and_records_spend_once(db_conn):
+    from ccpf.answer.narrate import stream_text
+
+    budget = NarrationBudgetTracker(db_conn, cap_usd=1.0)
+    client = _FakeStreamClient(_FakeStream(["Hel", "lo"]))
+    out = list(stream_text(client, budget, model=NARRATION_MODEL, system="s", user_content="u", max_tokens=10, ref="r"))
+    assert "".join(out) == "Hello"
+    assert budget.spent_microusd > 0
+    n = db_conn.execute("SELECT COUNT(*) FROM narration_spend_log").fetchone()[0]
+    assert n == 1
+
+
+def test_stream_text_refusal_and_empty_raise_narration_failed(db_conn):
+    from ccpf.answer.narrate import stream_text
+
+    budget = NarrationBudgetTracker(db_conn, cap_usd=1.0)
+    with pytest.raises(NarrationFailed):
+        list(stream_text(_FakeStreamClient(_FakeStream(["x"], stop_reason="refusal")), budget,
+                         model=NARRATION_MODEL, system="s", user_content="u", max_tokens=10, ref="r"))
+    with pytest.raises(NarrationFailed):
+        list(stream_text(_FakeStreamClient(_FakeStream([])), budget,
+                         model=NARRATION_MODEL, system="s", user_content="u", max_tokens=10, ref="r"))
+
+
+def test_stream_text_api_error_mid_stream_becomes_narration_failed(db_conn):
+    from ccpf.answer.narrate import stream_text
+
+    budget = NarrationBudgetTracker(db_conn, cap_usd=1.0)
+    with pytest.raises(NarrationFailed):
+        list(stream_text(_FakeStreamClient(_FakeStream(["a", "b"], fail_after=1)), budget,
+                         model=NARRATION_MODEL, system="s", user_content="u", max_tokens=10, ref="r"))
+
+
+def test_stream_text_respects_budget_cap(db_conn):
+    from ccpf.answer.narrate import stream_text
+
+    budget = NarrationBudgetTracker(db_conn, cap_usd=0.0)
+    budget.record(NARRATION_MODEL, ref="x", input_tokens=1000, output_tokens=1000)
+    with pytest.raises(NarrationBudgetExceeded):
+        list(stream_text(_FakeStreamClient(_FakeStream(["a"])), budget,
+                         model=NARRATION_MODEL, system="s", user_content="u", max_tokens=10, ref="r"))

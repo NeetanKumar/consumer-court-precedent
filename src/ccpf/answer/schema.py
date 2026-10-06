@@ -37,6 +37,9 @@ class Citation(BaseModel):
     relief_components: dict
     fact_summary: str
     relevance_score: float
+    title: Optional[str] = None
+    publishdate: Optional[str] = None
+    forum_level: Optional[str] = None
 
 
 class PrecedentAnswer(BaseModel):

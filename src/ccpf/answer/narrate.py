@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Iterator, Optional
 
 import anthropic
 
@@ -227,3 +227,67 @@ def narrate_answer(
     if not text.strip():
         raise NarrationFailed("narration model returned no text")
     return text
+
+
+def stream_text(
+    client: anthropic.Anthropic,
+    budget: NarrationBudgetTracker,
+    *,
+    model: str,
+    system: str,
+    user_content: str,
+    max_tokens: int,
+    ref: str,
+) -> Iterator[str]:
+    """Yield the model's text as it is generated, for st.write_stream.
+
+    Spend is recorded once, from the final message's usage, in a `finally`
+    so a consumer that stops reading early (user hits Stop) still pays only
+    for what was billed and the ledger stays honest. Raises
+    NarrationBudgetExceeded before any call, and NarrationFailed on API
+    errors, refusals or empty output — callers fall back exactly as with
+    the non-streaming path.
+    """
+    budget.check()
+    emitted = False
+    try:
+        with client.messages.stream(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user_content}],
+        ) as stream:
+            final = None
+            try:
+                for chunk in stream.text_stream:
+                    if chunk:
+                        emitted = True
+                        yield chunk
+            finally:
+                # A broken stream has no final message to read usage from;
+                # don't let that mask the original error.
+                try:
+                    final = stream.get_final_message()
+                    budget.record(
+                        model, ref=ref,
+                        input_tokens=final.usage.input_tokens, output_tokens=final.usage.output_tokens,
+                    )
+                except Exception:
+                    final = None
+            if final is not None and final.stop_reason == "refusal":
+                raise NarrationFailed("model refused")
+    except anthropic.APIError as exc:
+        raise NarrationFailed(f"streaming API call failed: {exc}") from exc
+    if not emitted:
+        raise NarrationFailed("model returned no text")
+
+
+def narrate_answer_stream(
+    client: anthropic.Anthropic, budget: NarrationBudgetTracker, answer: PrecedentAnswer
+) -> Iterator[str]:
+    payload = json.dumps(build_narration_payload(answer), indent=2, ensure_ascii=False)
+    return stream_text(
+        client, budget, model=NARRATION_MODEL, system=SYSTEM_PROMPT,
+        user_content=f"Structured precedent data:\n\n{payload}",
+        max_tokens=1024, ref=answer.query[:80],
+    )
