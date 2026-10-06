@@ -263,3 +263,23 @@ def test_search_aggregates_multiple_chunks_to_one_judgment(db_conn, tmp_path):
     # Only one result even though tid=1 produced multiple chunks.
     assert len(results) == 1
     assert results[0].tid == 1
+
+
+def test_search_duration_facet_excludes_other_and_unknown_durations(db_conn, tmp_path):
+    for tid, months in [(1, 12), (2, 60), (3, None)]:
+        _seed_doc(db_conn, tid, "possession delay builder " * 10)
+        j = json.loads(_judgment_json())
+        j["dispute_duration_months"] = months
+        db_conn.execute(
+            "INSERT INTO extractions (tid, category, model_used, escalated, confidence, judgment_json, extracted_at) "
+            "VALUES (?, 'builder_delay', 'claude-haiku-4-5', 0, 'high', ?, '2026-01-01T00:00:00+00:00')",
+            (tid, json.dumps(j)),
+        )
+    db_conn.commit()
+    embedder = FakeEmbedder(["possession", "delay", "builder"])
+    build_index(db_conn, "builder_delay", embedder, tmp_path)
+    index = HybridIndex.load(tmp_path / "builder_delay")
+
+    results = search(db_conn, index, embedder, "builder_delay", "possession delay",
+                     top_k=5, duration_range=(6, 24))
+    assert [r.tid for r in results] == [1]

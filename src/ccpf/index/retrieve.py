@@ -50,6 +50,7 @@ def _allowed_tids(
     outcomes: Optional[list[str]],
     date_from: Optional[str],
     date_to: Optional[str],
+    duration_range: Optional[tuple[int, int]] = None,
 ) -> dict[int, dict]:
     """Metadata pre-filter: which judgments match, and their structured
     Judgment fields (needed later for the final result and for outcome
@@ -74,6 +75,12 @@ def _allowed_tids(
         judgment = json.loads(row["judgment_json"])
         if outcomes is not None and judgment["outcome"] not in outcomes:
             continue
+        if duration_range is not None:
+            months = judgment.get("dispute_duration_months")
+            # A facet means "comparable on this dimension", so records where
+            # the duration is unknown cannot qualify.
+            if months is None or not (duration_range[0] <= months <= duration_range[1]):
+                continue
         result[row["tid"]] = judgment
     return result
 
@@ -96,8 +103,9 @@ def search(
     hybrid_candidates: int = 50,
     reranker: Optional[CrossEncoderReranker] = None,
     min_dense_similarity: Optional[float] = MIN_DENSE_SIMILARITY,
+    duration_range: Optional[tuple[int, int]] = None,
 ) -> list[RetrievedJudgment]:
-    judgments_by_tid = _allowed_tids(conn, category, outcomes, date_from, date_to)
+    judgments_by_tid = _allowed_tids(conn, category, outcomes, date_from, date_to, duration_range)
     if not judgments_by_tid:
         return []
 

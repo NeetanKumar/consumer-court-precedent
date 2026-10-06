@@ -227,3 +227,34 @@ def test_award_counts_ignore_unknown_and_count_true():
     ]
     assert compute_award_counts(rows) == (1, 2)
     assert compute_award_counts([{"tid": 5, "judgment": {}}]) == (0, 0)
+
+
+def _index_for(conn, tmp_path):
+    embedder = FakeEmbedder(["possession", "delay", "refund", "compensation"])
+    build_index(conn, "builder_delay", embedder, tmp_path)
+    return embedder, HybridIndex.load(tmp_path / "builder_delay")
+
+
+def test_duration_facet_applied_when_enough_comparable_cases(db_conn, tmp_path):
+    _seed_corpus(db_conn, n_docs=12)  # fixture judgments have dispute_duration_months=12
+    embedder, index = _index_for(db_conn, tmp_path)
+
+    answer = generate_answer(db_conn, index, embedder, "builder_delay", "possession delay of 1 year")
+
+    assert answer.refused is False
+    assert answer.duration_months_requested == 12
+    assert answer.duration_window == (6, 18)
+    assert answer.facet_relaxed is False
+
+
+def test_duration_facet_relaxed_when_too_few_comparable_cases(db_conn, tmp_path):
+    _seed_corpus(db_conn, n_docs=12)
+    embedder, index = _index_for(db_conn, tmp_path)
+
+    # 5 years is far from the 12-month fixtures, so the facet leaves 0 cases.
+    answer = generate_answer(db_conn, index, embedder, "builder_delay", "possession delay of 5 years")
+
+    assert answer.refused is False
+    assert answer.sample_size == 12
+    assert answer.facet_relaxed is True
+    assert answer.duration_window is None

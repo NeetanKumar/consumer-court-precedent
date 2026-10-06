@@ -10,6 +10,7 @@ import sqlite3
 from typing import Optional
 
 from ccpf.answer.aggregate import compute_award_counts, compute_component_stats, compute_outcome_distribution
+from ccpf.answer.facets import duration_window, parse_duration_months
 from ccpf.answer.schema import Citation, PrecedentAnswer
 from ccpf.index.embedder import Embedder
 from ccpf.index.rerank import CrossEncoderReranker
@@ -57,14 +58,32 @@ def generate_answer(
     min_relevance_score: Optional[float] = MIN_RELEVANCE_SCORE,
     min_dense_similarity: Optional[float] = MIN_DENSE_SIMILARITY,
     reranker: Optional[CrossEncoderReranker] = None,
+    use_facets: bool = True,
 ) -> PrecedentAnswer:
     filters_applied = {"outcomes": outcomes, "date_from": date_from, "date_to": date_to}
 
-    retrieved = search(
-        conn, index, embedder, category, situation,
-        top_k=sample_pool_size, outcomes=outcomes, date_from=date_from, date_to=date_to,
-        reranker=reranker, min_dense_similarity=min_dense_similarity,
-    )
+    def _search(duration_range=None):
+        return search(
+            conn, index, embedder, category, situation,
+            top_k=sample_pool_size, outcomes=outcomes, date_from=date_from, date_to=date_to,
+            reranker=reranker, min_dense_similarity=min_dense_similarity,
+            duration_range=duration_range,
+        )
+
+    # Comparability: if the user states how long the delay was, prefer
+    # judgments with a similar delay. If that leaves too few to answer
+    # reliably, fall back to the unfaceted set and say so.
+    requested_months = parse_duration_months(situation) if use_facets else None
+    window = duration_window(requested_months) if requested_months else None
+    facet_relaxed = False
+    retrieved = _search(window) if window else _search()
+    if window and len(retrieved) < min_sample_size:
+        retrieved = _search()
+        facet_relaxed = True
+        window_used = None
+    else:
+        window_used = window
+    filters_applied["duration_window"] = window_used
     n_retrieved = len(retrieved)
 
     relevance_filtered = False
@@ -129,6 +148,9 @@ def generate_answer(
         filters_applied=filters_applied,
         sample_size=sample_size,
         refused=False,
+        duration_months_requested=requested_months,
+        duration_window=window_used,
+        facet_relaxed=facet_relaxed,
         outcome_distribution=compute_outcome_distribution(judgments),
         award_made_count=awarded if known else None,
         award_known_count=known if known else None,

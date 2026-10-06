@@ -17,6 +17,14 @@ from typing import Optional
 from ccpf.answer.schema import ComponentStats
 
 
+def _quartiles(values: list[float]) -> tuple[Optional[float], Optional[float]]:
+    # Quartiles from <4 points are noise; report none rather than imply spread.
+    if len(values) < 4:
+        return None, None
+    q = statistics.quantiles(values, n=4, method="inclusive")
+    return q[0], q[2]
+
+
 def compute_component_stats(
     field_name: str,
     judgments: list[dict],
@@ -34,6 +42,7 @@ def compute_component_stats(
             values.append(val)
             contributing_tids.append(row["tid"])
 
+    p25, p75 = _quartiles(values)
     return ComponentStats(
         field_name=field_name,
         sample_size=sample_size,
@@ -41,7 +50,10 @@ def compute_component_stats(
         median=statistics.median(values) if values else None,
         min=min(values) if values else None,
         max=max(values) if values else None,
+        p25=p25,
+        p75=p75,
         contributing_tids=contributing_tids,
+        values=values,
     )
 
 

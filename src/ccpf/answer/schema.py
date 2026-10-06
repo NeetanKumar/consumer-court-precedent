@@ -19,7 +19,11 @@ class ComponentStats(BaseModel):
     median: Optional[float] = None
     min: Optional[float] = None
     max: Optional[float] = None
+    p25: Optional[float] = None
+    p75: Optional[float] = None
     contributing_tids: list[int] = Field(default_factory=list)
+    # Parallel to contributing_tids — lets the UI plot the real distribution.
+    values: list[float] = Field(default_factory=list)
 
     @property
     def coverage_fraction(self) -> float:
@@ -44,6 +48,12 @@ class PrecedentAnswer(BaseModel):
     outcome_distribution: dict[str, int] = Field(default_factory=dict)
     # Of the judgments where extraction could tell, how many actually directed
     # money to be paid. None = not yet extracted (pre-award_made records).
+    # Comparability: set when results were narrowed to a delay-length window
+    # (months, inclusive). `facet_relaxed` means the narrowed set was too
+    # small, so the unfiltered set is reported instead.
+    duration_months_requested: Optional[int] = None
+    duration_window: Optional[tuple[int, int]] = None
+    facet_relaxed: bool = False
     award_made_count: Optional[int] = None
     award_known_count: Optional[int] = None
     amount_claimed_stats: Optional[ComponentStats] = None
