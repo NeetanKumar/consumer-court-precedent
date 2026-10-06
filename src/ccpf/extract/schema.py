@@ -29,6 +29,12 @@ class Judgment(BaseModel):
         None, description="Duration of the delay/dispute in months, if stated or computable."
     )
     amount_claimed: Optional[float] = Field(None, description="Total amount originally claimed by the complainant, in INR.")
+    award_made: Optional[bool] = Field(
+        None,
+        description="True only if the final operative order directs the opposite party to pay or "
+        "refund money. False for remands, procedural dismissals, or any order with no monetary "
+        "direction. Null only if the order cannot be determined from the text.",
+    )
     relief_components: ReliefComponents
     outcome: Literal["allowed", "dismissed", "partly_allowed"] = Field(
         description="Whether the complaint was allowed, dismissed, or partly allowed."

@@ -9,7 +9,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Optional
 
-from ccpf.answer.aggregate import compute_component_stats, compute_outcome_distribution
+from ccpf.answer.aggregate import compute_award_counts, compute_component_stats, compute_outcome_distribution
 from ccpf.answer.schema import Citation, PrecedentAnswer
 from ccpf.index.embedder import Embedder
 from ccpf.index.rerank import CrossEncoderReranker
@@ -100,6 +100,8 @@ def generate_answer(
 
     judgments = [{"tid": r.tid, "judgment": r.judgment} for r in retrieved]
 
+    awarded, known = compute_award_counts(judgments)
+
     amount_claimed_stats = compute_component_stats(
         "amount_claimed", judgments, lambda j: j.get("amount_claimed"), sample_size
     )
@@ -128,6 +130,8 @@ def generate_answer(
         sample_size=sample_size,
         refused=False,
         outcome_distribution=compute_outcome_distribution(judgments),
+        award_made_count=awarded if known else None,
+        award_known_count=known if known else None,
         amount_claimed_stats=amount_claimed_stats,
         relief_component_stats=relief_stats,
         citations=citations,

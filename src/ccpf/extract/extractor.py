@@ -30,6 +30,19 @@ HAIKU_MODEL = "claude-haiku-4-5"
 SONNET_MODEL = "claude-sonnet-5"
 
 MAX_DOC_CHARS = 40_000  # keep prompts well inside Haiku's 200K context, cheaply
+# When a judgment exceeds MAX_DOC_CHARS, keep the opening (parties, facts,
+# prayer) and the END (operative order) and drop the middle. Cutting from the
+# front-only used to discard the operative order for ~20% of the corpus, which
+# is exactly where awarded amounts live.
+HEAD_CHARS = 15_000
+TAIL_CHARS = MAX_DOC_CHARS - HEAD_CHARS
+TRUNCATION_MARKER = "\n\n[... middle of judgment omitted for length ...]\n\n"
+
+
+def prepare_text(plain_text: str) -> str:
+    if len(plain_text) <= MAX_DOC_CHARS:
+        return plain_text
+    return plain_text[:HEAD_CHARS] + TRUNCATION_MARKER + plain_text[-TAIL_CHARS:]
 
 SYSTEM_PROMPT = (
     "You extract structured facts from Indian consumer court (NCDRC) judgments "
@@ -52,7 +65,14 @@ SYSTEM_PROMPT = (
     "- amounts mentioned only in the facts/background section describing what "
     "the complainant originally paid or sought.\n"
     "If the operative order does not state a component explicitly, leave it "
-    "null even if a related number appears elsewhere in the judgment."
+    "null even if a related number appears elsewhere in the judgment.\n\n"
+    "Many judgments award no money at all (remand to a lower forum, appeal "
+    "allowed/dismissed on a procedural point, complaint dismissed). For those, "
+    "set award_made=false and leave every relief component null. Set "
+    "award_made=true only if the final order itself directs the opposite party "
+    "to pay or refund money. A long judgment may be shortened with a "
+    "'[... middle of judgment omitted ...]' marker; the operative order is at "
+    "the end and is always included."
 )
 
 
@@ -125,7 +145,7 @@ class ClaudeExtractor(Extractor):
         )
 
     def _call(self, model: str, tid: int, plain_text: str) -> tuple[Optional[Judgment], tuple[int, int]]:
-        text = plain_text[:MAX_DOC_CHARS]
+        text = prepare_text(plain_text)
         try:
             response = self._client.messages.parse(
                 model=model,

@@ -154,6 +154,12 @@ def _render_details(answer: PrecedentAnswer) -> None:
             "**Outcome distribution:** "
             + ", ".join(f"{OUTCOME_BADGE.get(k, k)}: {v}" for k, v in answer.outcome_distribution.items())
         )
+        if answer.award_known_count:
+            st.markdown(
+                f"**Judgments that directed a monetary award:** "
+                f"{answer.award_made_count} of {answer.award_known_count} "
+                "(the rest were remands, procedural orders or dismissals)"
+            )
         lines = ["| Field | Coverage | Median | Min | Max |", "|---|---|---|---|---|"]
         stats_list = [answer.amount_claimed_stats] if answer.amount_claimed_stats else []
         stats_list += list(answer.relief_component_stats.values())

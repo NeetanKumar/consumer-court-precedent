@@ -307,3 +307,17 @@ def test_account_level_api_error_stops_run_cleanly(db_conn):
 
     row = db_conn.execute("SELECT COUNT(*) AS n FROM extractions").fetchone()
     assert row["n"] == 1
+
+
+def test_prepare_text_keeps_head_and_operative_order_tail():
+    from ccpf.extract.extractor import HEAD_CHARS, MAX_DOC_CHARS, TRUNCATION_MARKER, prepare_text
+
+    short = "x" * 100
+    assert prepare_text(short) == short
+
+    long = "H" * HEAD_CHARS + "M" * 100_000 + "ORDER: pay Rs 5 lakh"
+    out = prepare_text(long)
+    assert out.startswith("H" * HEAD_CHARS)
+    assert out.endswith("ORDER: pay Rs 5 lakh")
+    assert TRUNCATION_MARKER in out
+    assert len(out) <= MAX_DOC_CHARS + len(TRUNCATION_MARKER)

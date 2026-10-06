@@ -42,6 +42,10 @@ class PrecedentAnswer(BaseModel):
     refused: bool
     refusal_reason: Optional[str] = None
     outcome_distribution: dict[str, int] = Field(default_factory=dict)
+    # Of the judgments where extraction could tell, how many actually directed
+    # money to be paid. None = not yet extracted (pre-award_made records).
+    award_made_count: Optional[int] = None
+    award_known_count: Optional[int] = None
     amount_claimed_stats: Optional[ComponentStats] = None
     relief_component_stats: dict[str, ComponentStats] = Field(default_factory=dict)
     citations: list[Citation] = Field(default_factory=list)

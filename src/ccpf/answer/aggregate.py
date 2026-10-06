@@ -45,6 +45,15 @@ def compute_component_stats(
     )
 
 
+def compute_award_counts(judgments: list[dict]) -> tuple[int, int]:
+    """(awarded, known): how many judgments directed a monetary award, out
+    of those where extraction could tell (award_made is not null). Old
+    extractions predate the field, so known can be 0 — callers must treat
+    that as "unknown", not "none awarded"."""
+    known = [row["judgment"]["award_made"] for row in judgments if row["judgment"].get("award_made") is not None]
+    return sum(1 for v in known if v), len(known)
+
+
 def compute_outcome_distribution(judgments: list[dict]) -> dict[str, int]:
     dist: dict[str, int] = {}
     for row in judgments:

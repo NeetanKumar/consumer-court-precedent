@@ -214,3 +214,16 @@ def test_negative_cross_encoder_scores_do_not_cause_false_refusal_by_default(db_
 
     assert answer.refused is False
     assert answer.sample_size == 12
+
+
+def test_award_counts_ignore_unknown_and_count_true():
+    from ccpf.answer.aggregate import compute_award_counts
+
+    rows = [
+        {"tid": 1, "judgment": {"award_made": True}},
+        {"tid": 2, "judgment": {"award_made": False}},
+        {"tid": 3, "judgment": {"award_made": None}},
+        {"tid": 4, "judgment": {}},
+    ]
+    assert compute_award_counts(rows) == (1, 2)
+    assert compute_award_counts([{"tid": 5, "judgment": {}}]) == (0, 0)

@@ -135,6 +135,10 @@ def build_narration_payload(answer: PrecedentAnswer) -> dict:
         "situation_described": answer.query,
         "sample_size": answer.sample_size,
         "outcome_distribution": answer.outcome_distribution,
+        "judgments_that_awarded_money": (
+            f"{answer.award_made_count} of {answer.award_known_count}"
+            if answer.award_known_count else None
+        ),
         "amount_claimed": _stats_payload(answer.amount_claimed_stats),
         "relief_components": {k: _stats_payload(v) for k, v in answer.relief_component_stats.items()},
         "cited_judgments": [
